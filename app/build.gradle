@@ -25,7 +25,7 @@ android {
 
     defaultConfig {
         applicationId "com.google.mediapipe.examples.handlandmarker"
-        minSdk 24
+        minSdk 30
         targetSdk 32
         versionCode 1
         versionName "1.0"

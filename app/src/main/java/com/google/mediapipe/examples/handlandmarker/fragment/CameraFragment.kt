@@ -16,26 +16,32 @@
 package com.google.mediapipe.examples.handlandmarker.fragment
 
 import android.annotation.SuppressLint
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.res.Configuration
 import android.os.Bundle
+import android.os.IBinder
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.Toast
-import androidx.camera.core.Preview
+import androidx.camera.core.AspectRatio
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.Camera
-import androidx.camera.core.AspectRatio
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.navigation.Navigation
 import com.google.mediapipe.examples.handlandmarker.HandLandmarkerHelper
+import com.google.mediapipe.examples.handlandmarker.LSLService
 import com.google.mediapipe.examples.handlandmarker.MainViewModel
 import com.google.mediapipe.examples.handlandmarker.R
 import com.google.mediapipe.examples.handlandmarker.databinding.FragmentCameraBinding
@@ -66,6 +72,26 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
 
     /** Blocking ML operations are performed using this executor */
     private lateinit var backgroundExecutor: ExecutorService
+    private lateinit var lslService: LSLService
+    private lateinit var lslIntent: Intent
+    private var mBound: Boolean = false
+
+
+    /** Defines callbacks for service binding, passed to bindService().  */
+    private val connection = object : ServiceConnection {
+
+        override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            // We've bound to LocalService, cast the IBinder and get LocalService instance.
+            Log.e(TAG, "onService connected")
+            val binder = service as LSLService.LocalBinder
+            lslService = binder.getService()
+            mBound = true
+        }
+
+        override fun onServiceDisconnected(arg0: ComponentName) {
+            mBound = false
+        }
+    }
 
     override fun onResume() {
         super.onResume()
@@ -88,7 +114,8 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
 
     override fun onPause() {
         super.onPause()
-        if(this::handLandmarkerHelper.isInitialized) {
+        Log.e(TAG, "onPause")
+        if (this::handLandmarkerHelper.isInitialized) {
             viewModel.setMaxHands(handLandmarkerHelper.maxNumHands)
             viewModel.setMinHandDetectionConfidence(handLandmarkerHelper.minHandDetectionConfidence)
             viewModel.setMinHandTrackingConfidence(handLandmarkerHelper.minHandTrackingConfidence)
@@ -98,17 +125,34 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
             // Close the HandLandmarkerHelper and release resources
             backgroundExecutor.execute { handLandmarkerHelper.clearHandLandmarker() }
         }
+
+        // Do not pause the LSL stream
     }
 
     override fun onDestroyView() {
+        Log.e(TAG, "onDestroyView")
         _fragmentCameraBinding = null
         super.onDestroyView()
 
+        // undBind and stop service
+        requireContext().unbindService(connection)
+        mBound = false
+        requireContext().stopService(lslIntent)
         // Shut down our background executor
         backgroundExecutor.shutdown()
         backgroundExecutor.awaitTermination(
             Long.MAX_VALUE, TimeUnit.NANOSECONDS
         )
+    }
+
+    override fun onStart() {
+        Log.e(TAG,"onStart")
+        super.onStart()
+    }
+
+    override fun onStop() {
+        Log.e(TAG,"onStop")
+        super.onStop()
     }
 
     override fun onCreateView(
@@ -125,7 +169,7 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-
+        Log.e(TAG, "onViewCreated")
         // Initialize our background executor
         backgroundExecutor = Executors.newSingleThreadExecutor()
 
@@ -134,7 +178,10 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
             // Set up the camera and its use cases
             setUpCamera()
         }
-
+        Log.e(TAG, "Binding service")
+        lslIntent = Intent(context, LSLService::class.java)
+        requireContext().bindService(lslIntent, connection, Context.BIND_AUTO_CREATE)
+        ContextCompat.startForegroundService(requireContext(), lslIntent)
         // Create the HandLandmarkerHelper that will handle the inference
         backgroundExecutor.execute {
             handLandmarkerHelper = HandLandmarkerHelper(
@@ -249,7 +296,7 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
                     try {
                         handLandmarkerHelper.currentDelegate = p2
                         updateControlsUi()
-                    } catch(e: UninitializedPropertyAccessException) {
+                    } catch (e: UninitializedPropertyAccessException) {
                         Log.e(TAG, "HandLandmarkerHelper has not been initialized yet.")
                     }
                 }
@@ -374,6 +421,8 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
     override fun onResults(
         resultBundle: HandLandmarkerHelper.ResultBundle
     ) {
+        if (mBound)
+            lslService.onResults(resultBundle)
         activity?.runOnUiThread {
             if (_fragmentCameraBinding != null) {
                 fragmentCameraBinding.bottomSheetLayout.inferenceTimeVal.text =
@@ -394,6 +443,8 @@ class CameraFragment : Fragment(), HandLandmarkerHelper.LandmarkerListener {
     }
 
     override fun onError(error: String, errorCode: Int) {
+        if (mBound)
+            lslService.onError(error, errorCode)
         activity?.runOnUiThread {
             Toast.makeText(requireContext(), error, Toast.LENGTH_SHORT).show()
             if (errorCode == HandLandmarkerHelper.GPU_ERROR) {
